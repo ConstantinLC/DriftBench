@@ -6,42 +6,42 @@ from src.model import Unet
 from src.model_diffusion import DiffusionModel
 
 
-def load_model(model_type, checkpoint_path, config_path, device="cuda"):
-    """
+def load_model(model_type, checkpoint_path, config_path=None, model_params=None, device="cuda"):                                                                      
+    """        
     Load a UNet or DiffusionModel from a checkpoint.
 
     Args:
         model_type: "UNet" or "Diffusion"
         checkpoint_path: Path to the .pth checkpoint file
-        config_path: Path to the JSON config file (for model_params)
+        config_path: (Optional) Path to the JSON config file (for model_params). Deprecated, use model_params instead.
+        model_params: (Optional) Dict or DictConfig with model parameters. If provided, takes precedence over config_path.
         device: Device to load model onto
 
     Returns:
         Loaded model in eval mode
     """
-    with open(config_path, "r") as f:
-        config = json.load(f)
+    if model_params is None:
+        if config_path is None:
+            raise ValueError("Either config_path or model_params must be provided")
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        model_params = config["model_params"]
 
-    model_params = config["model_params"]
+    # Convert OmegaConf to dict if necessary
+    if hasattr(model_params, 'to_container'):
+        model_params = model_params.to_container()
+
+    # Keys that shouldn't be passed to model constructors
+    NON_MODEL_KEYS = {"type"}
 
     if model_type == "Diffusion":
-        model_config = dict(model_params)
-        model_config["checkpoint"] = checkpoint_path
-        model_config["load_betas"] = True
+        model_config = {k: v for k, v in model_params.items() if k not in NON_MODEL_KEYS}
         model = DiffusionModel(**model_config).to(device)
     elif model_type == "UNet":
-        model = Unet(
-            dim=model_params.get("dim", 64),
-            channels=model_params.get("channels", 2),
-            dim_mults=tuple(model_params.get("dim_mults", [1, 1, 1])),
-            use_convnext=True,
-            convnext_mult=model_params.get("convnext_mult", 1),
-            with_time_emb=model_params.get("with_time_emb", False),
-            padding_mode=model_params.get("padding_mode", "circular"),
-        )
+        model_kwargs = {k: v for k, v in model_params.items() if k not in NON_MODEL_KEYS}
+        model = Unet(use_convnext=True, **model_kwargs).to(device)
         ckpt = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(ckpt)
-        model = model.to(device)
     else:
         raise ValueError(f"Unknown model type: {model_type!r}. Use 'UNet' or 'Diffusion'.")
 

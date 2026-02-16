@@ -123,27 +123,15 @@ class DiffusionModel(nn.Module):
             )
         
         else : raise Exception
-        """if checkpoint != "":
-            print(f"Loading Checkpoint from {checkpoint}")
-            ckpt = torch.load(checkpoint)
-            if 'stateDictDecoder' in ckpt.keys():
-                ckpt = ckpt['stateDictDecoder']
-            checkpoint_unet = {key[5:]:ckpt[key] for key in ckpt if 'unet' in key and not 'sigmas' in key}
-            self.unet.load_state_dict(checkpoint_unet)
-            if load_betas and 'betas' in ckpt: 
-                betas = ckpt['betas']"""
-        
         if checkpoint != "":
             print(f"Loading Checkpoint from {checkpoint}")
             ckpt = torch.load(checkpoint)
             if 'stateDictDecoder' in ckpt.keys():
                 ckpt = ckpt['stateDictDecoder']
-            if 'model_state_dict' in ckpt.keys():
-                ckpt = ckpt['model_state_dict']
-            if not 'sigmas' in ckpt.keys():
-                ckpt['sigmas'] = torch.tensor([1])
-            #checkpoint_unet = {key[5:]:ckpt[key] for key in ckpt if 'unet' in key and not 'sigmas' in key}
-            self.unet.load_state_dict(ckpt)
+            checkpoint_unet = {key[5:]:ckpt[key] for key in ckpt if 'unet' in key and not 'sigmas' in key}
+            if not 'sigmas' in checkpoint_unet.keys():
+                checkpoint_unet['sigmas'] = torch.tensor([1])
+            self.unet.load_state_dict(checkpoint_unet)
             if load_betas and 'betas' in ckpt: 
                 betas = ckpt['betas']
 
