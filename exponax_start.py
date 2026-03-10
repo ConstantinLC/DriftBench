@@ -36,10 +36,10 @@ NET_CONFIG      = "UNet;12;2;relu"
 TRAIN_CONFIGS   = ["one", "sup;2"]
 OPTIM_CONFIG    = "adam;20_000;warmup_cosine;0.0;1e-3;2_000"
 NUM_SEEDS       = 1
-AR_STEPS        = 300              # Autoregressive rollout length
+AR_STEPS        = 50              # Autoregressive rollout length
 NUM_TRAJECTORIES = 20              # Number of trajectories to evaluate
 
-K               = 1               # GT steps in the proxy optimization: find x_IC s.t. GT^K(x_IC) ≈ x̂_t
+K               = 5               # GT steps in the proxy optimization: find x_IC s.t. GT^K(x_IC) ≈ x̂_t
 N_OPT_STEPS     = 1000              # Gradient steps per IC optimization
 OPT_LR          = 1e-3            # Learning rate for IC optimization
 
@@ -135,14 +135,18 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
     print(f"  NN trajectory shape: {nn_trajectories.shape}")
 
     # Per-timestep metrics
-    mse_nn_vs_gt1      = np.zeros(AR_STEPS)  # ||NN(x̂_t) - GT¹(x̂_t)||²
-    mse_proxy_match    = np.zeros(AR_STEPS)  # ||x̃_t - x̂_t||²  (optimization quality)
-    mse_exposure_bias  = np.zeros(AR_STEPS)  # ||NN(x̂_t) - GT(x̃_t)||²  (Element 1)
-    mse_total          = np.zeros(AR_STEPS)  # ||x̂_{t+1} - x_{t+1}||²
+    mse_nn_vs_gt1         = np.zeros(AR_STEPS)  # ||NN(x̂_t) - GT¹(x̂_t)||²
+    mse_proxy_match       = np.zeros(AR_STEPS)  # ||x̃_t - x̂_t||²  (optimization quality)
+    mse_exposure_bias     = np.zeros(AR_STEPS)  # ||NN(x̂_t) - GT(x̃_t)||²  (Element 1)
+    mse_total             = np.zeros(AR_STEPS)  # ||NN(x̂_t) - x_{t+1}||²  (total traj error)
+    mse_nn_on_proxy_vs_gt = np.zeros(AR_STEPS)  # ||NN(x̃_t) - x_{t+1}||²
+    mse_nn_state_vs_gt    = np.zeros(AR_STEPS)  # ||x̂_t - x_t||²  (NN state distance to GT)
+    mse_proxy_vs_gt_state = np.zeros(AR_STEPS)  # ||x̃_t - x_t||²  (proxy distance to GT)
 
     for t in range(AR_STEPS):
         nn_states_t  = nn_trajectories[:, t]     # x̂_t,   (N, C, X)
         nn_next_t    = nn_trajectories[:, t + 1] # x̂_{t+1} = NN(x̂_t)
+        gt_states_t  = gt_trajectories[:, t]     # x_t    (GT reference at t)
         gt_next_t    = gt_trajectories[:, t + 1] # x_{t+1} (GT reference)
 
         # Baseline: GT¹ applied directly to NN state
@@ -155,21 +159,31 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
         # Proxy next step: GT(x̃_t)
         proxy_next_t = jax.vmap(ref_stepper)(proxy_t)
 
-        mse_proxy_match[t]   = float(jnp.mean((proxy_t - nn_states_t) ** 2))
-        mse_exposure_bias[t] = float(jnp.mean((nn_next_t - proxy_next_t) ** 2))
-        mse_total[t]         = float(jnp.mean((nn_next_t - gt_next_t) ** 2))
+        mse_proxy_match[t]    = float(jnp.mean((proxy_t - nn_states_t) ** 2))
+        mse_exposure_bias[t]  = float(jnp.mean((nn_next_t - proxy_next_t) ** 2))
+        mse_total[t]          = float(jnp.mean((nn_next_t - gt_next_t) ** 2))
+        mse_nn_state_vs_gt[t] = float(jnp.mean((nn_states_t - gt_states_t) ** 2))
+        mse_proxy_vs_gt_state[t] = float(jnp.mean((proxy_t - gt_states_t) ** 2))
+
+        # Run NN from the proxy GT state, compare result to true x_{t+1}.
+        nn_on_proxy_next_t       = jax.vmap(neural_stepper)(proxy_t)
+        mse_nn_on_proxy_vs_gt[t] = float(jnp.mean((nn_on_proxy_next_t - gt_next_t) ** 2))
 
         if t % 10 == 0:
             print(f"  t={t:>3d}  opt_loss={float(opt_losses.mean()):.3e}"
                   f"  proxy_match={mse_proxy_match[t]:.3e}"
-                  f"  EB={mse_exposure_bias[t]:.3e}")
+                  f"  EB={mse_exposure_bias[t]:.3e}"
+                  f"  NN_on_proxy_vs_GT={mse_nn_on_proxy_vs_gt[t]:.3e}")
 
     results[train_config] = {
-        "nn_trajectories":   nn_trajectories,
-        "mse_nn_vs_gt1":     mse_nn_vs_gt1,
-        "mse_proxy_match":   mse_proxy_match,
-        "mse_exposure_bias": mse_exposure_bias,
-        "mse_total":         mse_total,
+        "nn_trajectories":        nn_trajectories,
+        "mse_nn_vs_gt1":          mse_nn_vs_gt1,
+        "mse_proxy_match":        mse_proxy_match,
+        "mse_exposure_bias":      mse_exposure_bias,
+        "mse_total":              mse_total,
+        "mse_nn_on_proxy_vs_gt":  mse_nn_on_proxy_vs_gt,
+        "mse_nn_state_vs_gt":     mse_nn_state_vs_gt,
+        "mse_proxy_vs_gt_state":  mse_proxy_vs_gt_state,
     }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -178,27 +192,29 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
 colors    = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 timesteps = np.arange(1, AR_STEPS + 1)
 
-fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+fig, axes = plt.subplots(1, 3, figsize=(20, 5))
 fig.suptitle(f"K={K}  |  N_OPT={N_OPT_STEPS}  |  {NET_CONFIG}  |  {SCENARIO_NAME}", fontsize=12)
 
 for i, (train_config, res) in enumerate(results.items()):
     c = colors[i]
+    gap = res["mse_total"] - res["mse_nn_on_proxy_vs_gt"]
+    spatial_advantage = res["mse_nn_state_vs_gt"] - res["mse_proxy_vs_gt_state"]
 
-    axes[0, 0].plot(timesteps, res["mse_nn_vs_gt1"],     color=c, label=train_config)
-    axes[0, 1].plot(timesteps, res["mse_proxy_match"],   color=c, label=train_config)
-    axes[1, 0].plot(timesteps, res["mse_exposure_bias"]/res["mse_nn_vs_gt1"], color=c, label=train_config)
-    axes[1, 1].plot(timesteps, res["mse_total"],         color=c, label=train_config)
+    axes[0].plot(timesteps, res["mse_total"],             color=c, label=train_config)
+    axes[1].plot(timesteps, gap,                          color=c, label=train_config)
+    axes[2].plot(timesteps, spatial_advantage,            color=c, label=train_config)
 
-for ax in axes.flat:
+for ax in axes:
     ax.set_yscale("log")
     ax.set_xlabel("AR step t")
     ax.set_ylabel("MSE")
     ax.legend()
 
-axes[0, 0].set_title(r"$\|NN(\hat{x}_t) - GT^1(\hat{x}_t)\|^2$" + "  (baseline: GT¹ on NN states)")
-axes[0, 1].set_title(r"$\|\tilde{x}_t - \hat{x}_t\|^2$" + "  (proxy optimization quality)")
-axes[1, 0].set_title(r"$\|NN(\hat{x}_t) - GT(\tilde{x}_t)\|^2$" + "  (exposure bias, Element 1)")
-axes[1, 1].set_title(r"$\|\hat{x}_{t+1} - x_{t+1}\|^2$" + "  (total trajectory error)")
+axes[0].set_title(r"$\|NN(\hat{x}_t) - x_{t+1}\|^2$" + "  (total trajectory error)")
+axes[1].set_title(r"$\|NN(\hat{x}_t)-x_{t+1}\|^2 - \|NN(\tilde{x}_t)-x_{t+1}\|^2$"
+                  + "\n(OOD cost: gap in next-step error)")
+axes[2].set_title(r"$\|\hat{x}_t - x_t\|^2 - \|\tilde{x}_t - x_t\|^2$"
+                  + "\n(spatial advantage of proxy over NN state)")
 
 plt.tight_layout()
 plt.savefig("proxy_model_evaluation.pdf", dpi=150)
@@ -219,3 +235,8 @@ for train_config, res in results.items():
     print(f"    Exposure bias @ t=1:   {res['mse_exposure_bias'][0]:.4e}")
     print(f"    Exposure bias @ t={AR_STEPS}: {res['mse_exposure_bias'][-1]:.4e}")
     print(f"    Total error @ t={AR_STEPS}:   {res['mse_total'][-1]:.4e}")
+    print(f"    NN-on-proxy vs GT @ t=1:   {res['mse_nn_on_proxy_vs_gt'][0]:.4e}")
+    print(f"    NN-on-proxy vs GT @ t={AR_STEPS}: {res['mse_nn_on_proxy_vs_gt'][-1]:.4e}")
+    gap = res["mse_total"] - res["mse_nn_on_proxy_vs_gt"]
+    print(f"    OOD cost (gap) @ t=1:   {gap[0]:.4e}")
+    print(f"    OOD cost (gap) @ t={AR_STEPS}: {gap[-1]:.4e}")
