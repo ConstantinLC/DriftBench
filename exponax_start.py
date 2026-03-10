@@ -33,15 +33,16 @@ import matplotlib.pyplot as plt
 # ──────────────────────────────────────────────────────────────────────
 SCENARIO_NAME   = "norm_ks"
 NET_CONFIG      = "UNet;12;2;relu"
-TRAIN_CONFIGS   = ["one", "sup;2"]
+TRAIN_CONFIGS   = ["one", "sup;2", "sup;5"]
 OPTIM_CONFIG    = "adam;20_000;warmup_cosine;0.0;1e-3;2_000"
 NUM_SEEDS       = 1
-AR_STEPS        = 50              # Autoregressive rollout length
+AR_STEPS        = 100              # Autoregressive rollout length
 NUM_TRAJECTORIES = 20              # Number of trajectories to evaluate
 
 K               = 5               # GT steps in the proxy optimization: find x_IC s.t. GT^K(x_IC) ≈ x̂_t
 N_OPT_STEPS     = 1000              # Gradient steps per IC optimization
 OPT_LR          = 1e-3            # Learning rate for IC optimization
+S_LOOKAHEAD     = 10              # GT lookahead steps from proxy for exposure bias metric
 
 # ──────────────────────────────────────────────────────────────────────
 # Setup: scenario, steppers, shared ICs
@@ -142,6 +143,9 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
     mse_nn_on_proxy_vs_gt = np.zeros(AR_STEPS)  # ||NN(x̃_t) - x_{t+1}||²
     mse_nn_state_vs_gt    = np.zeros(AR_STEPS)  # ||x̂_t - x_t||²  (NN state distance to GT)
     mse_proxy_vs_gt_state = np.zeros(AR_STEPS)  # ||x̃_t - x_t||²  (proxy distance to GT)
+    # proxy_rollout_error[t, k] = ||GT^k(x̃_t) - x̂_{t+k}||²  for k=1..S_LOOKAHEAD
+    # Rows with t + S_LOOKAHEAD > AR_STEPS are filled only up to AR_STEPS.
+    proxy_rollout_error = np.full((AR_STEPS, S_LOOKAHEAD), np.nan)
 
     for t in range(AR_STEPS):
         nn_states_t  = nn_trajectories[:, t]     # x̂_t,   (N, C, X)
@@ -169,6 +173,15 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
         nn_on_proxy_next_t       = jax.vmap(neural_stepper)(proxy_t)
         mse_nn_on_proxy_vs_gt[t] = float(jnp.mean((nn_on_proxy_next_t - gt_next_t) ** 2))
 
+        # Proxy rollout: evolve x̃_t forward k GT steps, compare to NN trajectory x̂_{t+k}.
+        # Error growing with k indicates the NN diverges from a physics-consistent trajectory.
+        max_k = min(S_LOOKAHEAD, AR_STEPS - t)
+        proxy_rolled = proxy_t
+        for k in range(1, max_k + 1):
+            proxy_rolled = jax.vmap(ref_stepper)(proxy_rolled)
+            nn_future = nn_trajectories[:, t + k]  # x̂_{t+k}
+            proxy_rollout_error[t, k - 1] = float(jnp.mean((proxy_rolled - nn_future) ** 2))
+
         if t % 10 == 0:
             print(f"  t={t:>3d}  opt_loss={float(opt_losses.mean()):.3e}"
                   f"  proxy_match={mse_proxy_match[t]:.3e}"
@@ -184,6 +197,7 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
         "mse_nn_on_proxy_vs_gt":  mse_nn_on_proxy_vs_gt,
         "mse_nn_state_vs_gt":     mse_nn_state_vs_gt,
         "mse_proxy_vs_gt_state":  mse_proxy_vs_gt_state,
+        "proxy_rollout_error":    proxy_rollout_error,
     }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -192,29 +206,23 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
 colors    = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 timesteps = np.arange(1, AR_STEPS + 1)
 
-fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+# Lookahead values s to display (one curve each)
+PLOT_S_VALUES = [1, 3, 5, S_LOOKAHEAD]
+
+fig, axes = plt.subplots(1, len(PLOT_S_VALUES), figsize=(6 * len(PLOT_S_VALUES), 5))
 fig.suptitle(f"K={K}  |  N_OPT={N_OPT_STEPS}  |  {NET_CONFIG}  |  {SCENARIO_NAME}", fontsize=12)
 
-for i, (train_config, res) in enumerate(results.items()):
-    c = colors[i]
-    gap = res["mse_total"] - res["mse_nn_on_proxy_vs_gt"]
-    spatial_advantage = res["mse_nn_state_vs_gt"] - res["mse_proxy_vs_gt_state"]
-
-    axes[0].plot(timesteps, res["mse_total"],             color=c, label=train_config)
-    axes[1].plot(timesteps, gap,                          color=c, label=train_config)
-    axes[2].plot(timesteps, spatial_advantage,            color=c, label=train_config)
-
-for ax in axes:
-    ax.set_yscale("log")
-    ax.set_xlabel("AR step t")
-    ax.set_ylabel("MSE")
-    ax.legend()
-
-axes[0].set_title(r"$\|NN(\hat{x}_t) - x_{t+1}\|^2$" + "  (total trajectory error)")
-axes[1].set_title(r"$\|NN(\hat{x}_t)-x_{t+1}\|^2 - \|NN(\tilde{x}_t)-x_{t+1}\|^2$"
-                  + "\n(OOD cost: gap in next-step error)")
-axes[2].set_title(r"$\|\hat{x}_t - x_t\|^2 - \|\tilde{x}_t - x_t\|^2$"
-                  + "\n(spatial advantage of proxy over NN state)")
+for j, s in enumerate(PLOT_S_VALUES):
+    for i, (train_config, res) in enumerate(results.items()):
+        c = colors[i]
+        col = res["proxy_rollout_error"][:, s - 1]   # shape (AR_STEPS,)
+        valid = ~np.isnan(col)
+        axes[j].plot(timesteps[valid], col[valid], color=c, label=train_config)
+    axes[j].set_yscale("log")
+    axes[j].set_xlabel("AR step t")
+    axes[j].set_ylabel("MSE")
+    axes[j].legend(fontsize=8)
+    axes[j].set_title(rf"$s={s}$  —  $\|GT^{s}(\tilde{{x}}_t) - \hat{{x}}_{{t+{s}}}\|^2$")
 
 plt.tight_layout()
 plt.savefig("proxy_model_evaluation.pdf", dpi=150)
@@ -240,3 +248,9 @@ for train_config, res in results.items():
     gap = res["mse_total"] - res["mse_nn_on_proxy_vs_gt"]
     print(f"    OOD cost (gap) @ t=1:   {gap[0]:.4e}")
     print(f"    OOD cost (gap) @ t={AR_STEPS}: {gap[-1]:.4e}")
+    rollout = res["proxy_rollout_error"]
+    print(f"    Proxy rollout error @ t=0,  k=1: {rollout[0,  0]:.4e}")
+    print(f"    Proxy rollout error @ t=0,  k={S_LOOKAHEAD}: {rollout[0,  S_LOOKAHEAD-1]:.4e}")
+    mid = AR_STEPS // 2
+    print(f"    Proxy rollout error @ t={mid}, k=1: {rollout[mid, 0]:.4e}")
+    print(f"    Proxy rollout error @ t={mid}, k={S_LOOKAHEAD}: {rollout[mid, S_LOOKAHEAD-1]:.4e}")

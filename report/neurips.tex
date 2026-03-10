@@ -200,6 +200,8 @@ At a given timestep $t$, we write
 
 \end{tikzpicture}
 
+\begin{figure}
+
 \begin{tikzpicture}[>=Stealth, node distance=2.5cm, thick]
 
 % Define nodes
@@ -247,6 +249,9 @@ At a given timestep $t$, we write
 \end{scope}
 
 \end{tikzpicture}
+\label{fig:decomposition}
+\caption{Decomposition into Systematic Drift, One-Step Error, and Exposure-Bias}
+\end{figure}
 
 We have that :
 
@@ -652,6 +657,28 @@ By contrast, Burgers' equation is less informative for this analysis: it is not 
 Actually, let's try to not compare the model's prediction with the GT on the GT proxy, as it may be arbitrary far away. What we want to know is whether a ML model suffers from its own distribution more than it would suffer from a GT state. By suffering, we therefore mean that its error is further away from the GT trajectory (total trajectory error). Therefore, at each step in the ML trajectory, we can run the ML model on the proxy GT, the ML model on itself, and compute the 2 errors w.r.t the GT trajectory.
 Also one must compute the difference in 
  error between $MSE(NN(x_hat), x_gt)$ and $MSE(NN(x_tilde, x_gt))$ to ensure that the cost of out-of-dist input is not just due to the proxy gt being     
-closer to the true trajectory                                                                                        
+closer to the true trajectory.
+
+\begin{figure}
+   \centering
+  \includegraphics[width=0.95\textwidth]{/mnt/SSD2/constantin/drift-bench/outputs/2026-03-10/nn_on_own_traj_vs_nn_on_proxy_gt.pdf}
+  \label{fig:100326_proxy}
+\end{figure}
+
+\paragraph{10.03.2026 - 2}
+
+In previous figure, it appears there is a difference in error between calling NN on its own traj, vs calling it on the GT traj, however, there is also a difference in the original error (spatial advantage). I don't think it's a relevant metric to compare to the true GT because it quickly accumulates too much.
+
+An alternative is: at a given step $t$, compute the GT proxy. Then for a given $s$, run $s$ GT steps from there, and look at the error betwen $\hat{x}_{t+k}$ and $GT^k(\tilde{x})$. Look at how this error evolves with time. We expect that a model suffers from its out-of-distribution if the error increases. Since the proxy estimate's error, as seen above, doesn't increase as $t$ increases, it's likely that the metric is accurate.
+
+\begin{figure}
+   \centering
+  \includegraphics[width=0.95\textwidth]{/mnt/SSD2/constantin/drift-bench/outputs/2026-03-10/proxy_gt_called_multiple_times_time_evolution.pdf}
+  \label{fig:100326_proxy}
+\end{figure}
+
+\paragraph{11.03.2026 - 3}
+
+We need more than just a trend. We need a precise characterization of each term. We want to know: at a given timestep, what is the contribution of each term, as in Figure \ref{fig:decomposition}. First, we need to check if the sum of the three terms actually the total error
 
 \end{document}
