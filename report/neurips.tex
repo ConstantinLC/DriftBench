@@ -260,10 +260,17 @@ We have that :
     &\leq \textcolor{blue}{\norm{X_{t+1} - {\tilde{X}_{t+1}}}} + \textcolor{green}{\norm{GT(\hat{X}_{t}) - NN\left(\hat{X}_t^{ID}\right)}} + \textcolor{red}{\norm{NN\left(\hat{X}_t^{ID}\right) - NN\left(\hat{X}_t\right)}} \\
     &= \textcolor{blue}{d_{TD}(t)} + \textcolor{green}{d_{OS}(t)} + \textcolor{red}{d_{EB}(t)}
 \end{align*}
-
+Another possibility (11/03/2026): 
 \begin{align*}
-    \norm{\hat{X}_{t+1} - X_{t+1}} = \epsilon(t+1) &\leq \norm{X_{t+1} - \tilde{X}_{t+1}} + \norm{\tilde{X}_{t+1} - \hat{X}_{t+1}} \\ 
-    &\leq \textcolor{blue}{\norm{X_{t+1} - {\tilde{X}_{t+1}}}} + \textcolor{green}{\norm{GT(\hat{X}_{t}) - NN\left(\hat{X}_t^{ID}\right)}} + \textcolor{red}{\norm{NN\left(\hat{X}_t^{ID}\right) - NN\left(\hat{X}_t\right)}} \\
+    \norm{\hat{X}_{t+1} - X_{t+1}} = \epsilon(t+1)
+    &\leq \textcolor{blue}{\norm{X_{t+1} - GT(\hat{X}_{t}^{ID})}} + \textcolor{green}{\norm{GT(\hat{X}_{t}^{ID}) - NN\left(\hat{X}_t^{ID}\right)}} + \textcolor{red}{\norm{NN\left(\hat{X}_t^{ID}\right) - NN\left(\hat{X}_t\right)}} \\
+    &= \textcolor{blue}{d_{TD}(t)} + \textcolor{green}{d_{OS}(t)} + \textcolor{red}{d_{EB}(t)}
+\end{align*}
+
+Another possibility - Without looking for in-distribution equivalent (11/03/2026): 
+\begin{align*}
+    \norm{\hat{X}_{t+1} - X_{t+1}} = \epsilon(t+1)
+    &\leq \textcolor{blue}{\norm{X_{t+1} - GT(\hat{X}_{t}^{ID})}} + \textcolor{green}{\norm{GT(\hat{X}_{t}^{ID}) - NN\left(\hat{X}_t^{ID}\right)}} + \textcolor{red}{\norm{NN\left(\hat{X}_t^{ID}\right) - NN\left(\hat{X}_t\right)}} \\
     &= \textcolor{blue}{d_{TD}(t)} + \textcolor{green}{d_{OS}(t)} + \textcolor{red}{d_{EB}(t)}
 \end{align*}
 where each term represents, respectively:

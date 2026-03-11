@@ -2,10 +2,13 @@
 Three-term error decomposition (Section from neurips.tex, §11.03.2026-3).
 
 For each AR step t, compute and verify:
-    ε²(t+1) = ||x̂_{t+1} - x_{t+1}||²          (total trajectory error, squared)
-    d_TD²(t) = ||x_{t+1} - GT(x̂_t)||²          (trajectory drift, squared)
-    d_OS²(t) = ||GT(x̂_t) - NN(x̃_t)||²         (one-step error, squared)
-    d_EB²(t) = ||NN(x̃_t) - NN(x̂_t)||²         (exposure bias, squared)
+    ε²(t+1)  = ||x̂_{t+1} - x_{t+1}||²               (total trajectory error, squared)
+    d_TD²(t) = ||x_{t+1} - GT(x̂_t^ID)||²            (trajectory drift, squared)
+    d_OS²(t) = ||GT(x̂_t^ID) - NN(x̂_t^ID)||²        (one-step error, squared)
+    d_EB²(t) = ||NN(x̂_t^ID) - NN(x̂_t)||²           (exposure bias, squared)
+
+"Another possibility" definition (neurips.tex 11/03/2026):
+    pivot is GT(x̂_t^ID) — GT applied to the proxy — instead of GT(x̂_t).
 
 In high dimensions, vectors are near-orthogonal, so:
     ε²(t+1) ≈ d_TD²(t) + d_OS²(t) + d_EB²(t)  (Pythagorean approx.)
@@ -13,7 +16,7 @@ In high dimensions, vectors are near-orthogonal, so:
 
 import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import jax
 import jax.numpy as jnp
@@ -28,7 +31,7 @@ import matplotlib.pyplot as plt
 # 0. Configuration
 # ──────────────────────────────────────────────────────────────────────
 SCENARIO_NAME   = "norm_ks"
-NET_CONFIG      = 'Dil;2;32;2;relu' #"UNet;12;2;relu"
+NET_CONFIG      = 'Dil;2;32;2;relu' #"UNet;12;2;relu" # #
 TRAIN_CONFIGS   = ["one", "sup;2", "sup;5"]
 OPTIM_CONFIG    = "adam;20_000;warmup_cosine;0.0;1e-3;2_000"
 NUM_SEEDS       = 1
@@ -37,6 +40,8 @@ NUM_TRAJECTORIES = 20              # Number of trajectories to evaluate
 
 K               = 5               # GT steps in proxy optimization: find x_IC s.t. GT^K(x_IC) ≈ x̂_t
 N_OPT_STEPS     = 1000            # Gradient steps per IC optimization
+TWO_TERM        = True            # If True: merge d_TD+d_OS → d_TDOS = ||x_{t+1} - NN(x̂_t^ID)||
+                                  # Only one cross dot-product remains: 2⟨d_TDOS, d_EB⟩
 OPT_LR          = 1e-3            # Learning rate for IC optimization
 
 # ──────────────────────────────────────────────────────────────────────
@@ -130,13 +135,17 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
     print(f"  NN trajectory shape: {nn_trajectories.shape}")
 
     # Per-timestep decomposition
-    total_error = np.zeros(AR_STEPS)    # ε²(t+1) = ||x̂_{t+1} - x_{t+1}||²
-    d_td        = np.zeros(AR_STEPS)    # d_TD²(t) = ||x_{t+1} - GT(x̂_t)||²
-    d_os        = np.zeros(AR_STEPS)    # d_OS²(t) = ||GT(x̂_t) - NN(x̃_t)||²
-    d_eb        = np.zeros(AR_STEPS)    # d_EB²(t) = ||NN(x̃_t) - NN(x̂_t)||²
-    dot_eb_os   = np.zeros(AR_STEPS)    # 2⟨d_EB, d_OS⟩
-    dot_eb_td   = np.zeros(AR_STEPS)    # 2⟨d_EB, d_TD⟩
-    dot_os_td   = np.zeros(AR_STEPS)    # 2⟨d_OS, d_TD⟩
+    total_error = np.zeros(AR_STEPS)    # ε²(t+1)  = ||x̂_{t+1} - x_{t+1}||²
+    d_eb        = np.zeros(AR_STEPS)    # d_EB²(t) = ||NN(x̂_t^ID) - NN(x̂_t)||²
+    if TWO_TERM:
+        d_tdos    = np.zeros(AR_STEPS)  # d_TDOS²(t) = ||x_{t+1} - NN(x̂_t^ID)||²  (merged TD+OS)
+        dot_tdos_eb = np.zeros(AR_STEPS)  # 2⟨d_TDOS, d_EB⟩
+    else:
+        d_td      = np.zeros(AR_STEPS)  # d_TD²(t) = ||x_{t+1} - GT(x̂_t^ID)||²
+        d_os      = np.zeros(AR_STEPS)  # d_OS²(t) = ||GT(x̂_t^ID) - NN(x̂_t^ID)||²
+        dot_eb_os = np.zeros(AR_STEPS)  # 2⟨d_EB, d_OS⟩
+        dot_eb_td = np.zeros(AR_STEPS)  # 2⟨d_EB, d_TD⟩
+        dot_os_td = np.zeros(AR_STEPS)  # 2⟨d_OS, d_TD⟩
 
     def dot(a, b):
         """Mean over batch of spatial dot products: E[⟨a_i, b_i⟩]."""
@@ -147,63 +156,84 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
         nn_next_t   = nn_trajectories[:, t + 1]  # x̂_{t+1} = NN(x̂_t)
         gt_next_t   = gt_trajectories[:, t + 1]  # x_{t+1}
 
-        # GT applied to NN state: GT(x̂_t)
-        gt_on_nn_t = jax.vmap(ref_stepper)(nn_states_t)
-
-        # Proxy optimization: find x̃_t ≈ x̂_t on a physical trajectory
+        # Proxy optimization: find x̂_t^ID s.t. GT^K(x̂_t^ID) ≈ x̂_t
         proxy_t, opt_loss = optimize_batch(nn_states_t, nn_next_t)
 
-        # NN applied to proxy: NN(x̃_t)
+        # NN applied to proxy: NN(x̂_t^ID)
         nn_on_proxy_t = jax.vmap(neural_stepper)(proxy_t)
 
-        # Error vectors (N, C, X)
-        vec_td = gt_next_t    - gt_on_nn_t      # GT(x̂_t) → x_{t+1}
-        vec_os = gt_on_nn_t   - nn_on_proxy_t   # NN(x̃_t) → GT(x̂_t)
-        vec_eb = nn_on_proxy_t - nn_next_t       # NN(x̂_t) → NN(x̃_t)
-        # Note: vec_td + vec_os + vec_eb = gt_next_t - nn_next_t = -ε  (telescoping)
+        # EB vector (common to both modes)
+        vec_eb = nn_on_proxy_t - nn_next_t        # NN(x̂_t^ID) - NN(x̂_t)
 
-        # Squared norms
         total_error[t] = float(jnp.mean(jnp.sum((nn_next_t - gt_next_t) ** 2, axis=(-2, -1))))
-        d_td[t]        = float(jnp.mean(jnp.sum(vec_td ** 2, axis=(-2, -1))))
-        d_os[t]        = float(jnp.mean(jnp.sum(vec_os ** 2, axis=(-2, -1))))
         d_eb[t]        = float(jnp.mean(jnp.sum(vec_eb ** 2, axis=(-2, -1))))
 
-        # Cross dot-products (×2 for the exact expansion)
-        dot_eb_os[t] = float(2 * dot(vec_eb, vec_os))
-        dot_eb_td[t] = float(2 * dot(vec_eb, vec_td))
-        dot_os_td[t] = float(2 * dot(vec_os, vec_td))
+        if TWO_TERM:
+            vec_tdos     = gt_next_t - nn_on_proxy_t  # x_{t+1} - NN(x̂_t^ID)
+            d_tdos[t]    = float(jnp.mean(jnp.sum(vec_tdos ** 2, axis=(-2, -1))))
+            dot_tdos_eb[t] = float(2 * dot(vec_tdos, vec_eb))
 
-        if t % 5 == 0:
-            pyth_sum = d_td[t] + d_os[t] + d_eb[t]
-            exact_sum = pyth_sum + dot_eb_os[t] + dot_eb_td[t] + dot_os_td[t]
-            cross_frac = (dot_eb_os[t] + dot_eb_td[t] + dot_os_td[t]) / (total_error[t] + 1e-30)
-            print(f"  t={t+1:>3d}  ε²={total_error[t]:.3e}  "
-                  f"Σd²={pyth_sum:.3e}  exact={exact_sum:.3e}  "
-                  f"cross/ε²={cross_frac:+.3f}")
+            if t % 5 == 0:
+                pyth_sum  = d_tdos[t] + d_eb[t]
+                exact_sum = pyth_sum + dot_tdos_eb[t]
+                cross_frac = dot_tdos_eb[t] / (total_error[t] + 1e-30)
+                print(f"  t={t+1:>3d}  ε²={total_error[t]:.3e}  "
+                      f"d_TDOS²={d_tdos[t]:.3e}  d_EB²={d_eb[t]:.3e}  "
+                      f"exact={exact_sum:.3e}  cross/ε²={cross_frac:+.3f}")
+        else:
+            gt_on_proxy_t = jax.vmap(ref_stepper)(proxy_t)
+            vec_td = gt_next_t     - gt_on_proxy_t   # x_{t+1} - GT(x̂_t^ID)
+            vec_os = gt_on_proxy_t - nn_on_proxy_t   # GT(x̂_t^ID) - NN(x̂_t^ID)
 
-    results[train_config] = {
-        "total_error": total_error,
-        "d_td": d_td,
-        "d_os": d_os,
-        "d_eb": d_eb,
-        "dot_eb_os": dot_eb_os,
-        "dot_eb_td": dot_eb_td,
-        "dot_os_td": dot_os_td,
-    }
+            d_td[t]        = float(jnp.mean(jnp.sum(vec_td ** 2, axis=(-2, -1))))
+            d_os[t]        = float(jnp.mean(jnp.sum(vec_os ** 2, axis=(-2, -1))))
+            dot_eb_os[t]   = float(2 * dot(vec_eb, vec_os))
+            dot_eb_td[t]   = float(2 * dot(vec_eb, vec_td))
+            dot_os_td[t]   = float(2 * dot(vec_os, vec_td))
+
+            if t % 5 == 0:
+                pyth_sum  = d_td[t] + d_os[t] + d_eb[t]
+                exact_sum = pyth_sum + dot_eb_os[t] + dot_eb_td[t] + dot_os_td[t]
+                cross_frac = (dot_eb_os[t] + dot_eb_td[t] + dot_os_td[t]) / (total_error[t] + 1e-30)
+                print(f"  t={t+1:>3d}  ε²={total_error[t]:.3e}  "
+                      f"Σd²={pyth_sum:.3e}  exact={exact_sum:.3e}  "
+                      f"cross/ε²={cross_frac:+.3f}")
+
+    if TWO_TERM:
+        results[train_config] = {
+            "total_error": total_error,
+            "d_tdos": d_tdos,
+            "d_eb": d_eb,
+            "dot_tdos_eb": dot_tdos_eb,
+        }
+    else:
+        results[train_config] = {
+            "total_error": total_error,
+            "d_td": d_td,
+            "d_os": d_os,
+            "d_eb": d_eb,
+            "dot_eb_os": dot_eb_os,
+            "dot_eb_td": dot_eb_td,
+            "dot_os_td": dot_os_td,
+        }
 
 # ──────────────────────────────────────────────────────────────────────
-# Ranking benchmark (§11.03.2026): does d_TD²+d_OS²+d_EB² rank models
-# the same way as ε² at each timestep?
+# Ranking benchmark (§11.03.2026)
 # ──────────────────────────────────────────────────────────────────────
 config_names = list(results.keys())
 
 # Stack arrays: shape (n_models, AR_STEPS)
 total_error_mat = np.stack([results[c]["total_error"] for c in config_names])
-pyth_sum_mat    = np.stack([results[c]["d_td"] + results[c]["d_os"] + results[c]["d_eb"]
-                            for c in config_names])
-exact_sum_mat   = np.stack([results[c]["d_td"] + results[c]["d_os"] + results[c]["d_eb"]
-                            + results[c]["dot_eb_os"] + results[c]["dot_eb_td"] + results[c]["dot_os_td"]
-                            for c in config_names])
+if TWO_TERM:
+    pyth_sum_mat  = np.stack([results[c]["d_tdos"] + results[c]["d_eb"] for c in config_names])
+    exact_sum_mat = np.stack([results[c]["d_tdos"] + results[c]["d_eb"] + results[c]["dot_tdos_eb"]
+                              for c in config_names])
+else:
+    pyth_sum_mat  = np.stack([results[c]["d_td"] + results[c]["d_os"] + results[c]["d_eb"]
+                              for c in config_names])
+    exact_sum_mat = np.stack([results[c]["d_td"] + results[c]["d_os"] + results[c]["d_eb"]
+                              + results[c]["dot_eb_os"] + results[c]["dot_eb_td"] + results[c]["dot_os_td"]
+                              for c in config_names])
 
 # Per-timestep: do rankings match?
 rank_eps   = np.argsort(np.argsort(total_error_mat, axis=0), axis=0)  # (n_models, AR_STEPS)
@@ -226,34 +256,48 @@ print(f"Σd²+cross agreement: {rank_match_exact.mean()*100:.1f}% ({rank_match_e
 timesteps = np.arange(1, AR_STEPS + 1)
 n_configs = len(results)
 
+n_terms = "Two" if TWO_TERM else "Three"
 fig, axes = plt.subplots(1, n_configs, figsize=(6 * n_configs, 5))
 if n_configs == 1:
     axes = [axes]
-fig.suptitle(f"Three-term decomposition (squared norms)  |  K={K}  |  {NET_CONFIG}  |  {SCENARIO_NAME}", fontsize=12)
+fig.suptitle(f"{n_terms}-term decomposition (squared norms)  |  K={K}  |  {NET_CONFIG}  |  {SCENARIO_NAME}", fontsize=12)
 
 for ax, (train_config, res) in zip(axes, results.items()):
-    pyth_sum  = res["d_td"] + res["d_os"] + res["d_eb"]
-    cross_sum = res["dot_eb_os"] + res["dot_eb_td"] + res["dot_os_td"]
-    exact_sum = pyth_sum + cross_sum
-
-    ax.plot(timesteps, res["total_error"], "k-",  lw=2,   label=r"$\epsilon^2$ (total)")
-    ax.plot(timesteps, exact_sum,          "k--", lw=1.5, label=r"$\Sigma d_i^2 + 2\Sigma\langle d_i,d_j\rangle$ (exact)")
-    ax.plot(timesteps, pyth_sum,           "k:",  lw=1,   label=r"$\Sigma d_i^2$ (Pythagorean)")
-    ax.plot(timesteps, res["d_td"], label=r"$d_{TD}^2$")
-    ax.plot(timesteps, res["d_os"], label=r"$d_{OS}^2$")
-    ax.plot(timesteps, res["d_eb"], label=r"$d_{EB}^2$")
-    for key, label in [
-        ("dot_eb_os", r"$|2\langle d_{EB},d_{OS}\rangle|$"),
-        ("dot_eb_td", r"$|2\langle d_{EB},d_{TD}\rangle|$"),
-        ("dot_os_td", r"$|2\langle d_{OS},d_{TD}\rangle|$"),
-    ]:
-        vals = res[key]
-        line, = ax.plot(timesteps, np.abs(vals), ls="--", alpha=0.6, label=label)
-        # Mark negative regions with filled circles
+    if TWO_TERM:
+        pyth_sum  = res["d_tdos"] + res["d_eb"]
+        exact_sum = pyth_sum + res["dot_tdos_eb"]
+        ax.plot(timesteps, res["total_error"], "k-",  lw=2,   label=r"$\epsilon^2$ (total)")
+        ax.plot(timesteps, exact_sum,          "k--", lw=1.5, label=r"$d_{TDOS}^2+d_{EB}^2+2\langle d_{TDOS},d_{EB}\rangle$ (exact)")
+        ax.plot(timesteps, pyth_sum,           "k:",  lw=1,   label=r"$d_{TDOS}^2+d_{EB}^2$ (Pythagorean)")
+        ax.plot(timesteps, res["d_tdos"], label=r"$d_{TDOS}^2$ (drift+one-step)")
+        ax.plot(timesteps, res["d_eb"],   label=r"$d_{EB}^2$ (exposure bias)")
+        vals = res["dot_tdos_eb"]
+        line, = ax.plot(timesteps, np.abs(vals), ls="--", alpha=0.6, label=r"$|2\langle d_{TDOS},d_{EB}\rangle|$")
         neg_mask = vals < 0
         if neg_mask.any():
             ax.scatter(timesteps[neg_mask], np.abs(vals[neg_mask]),
                        color=line.get_color(), marker="x", s=40, zorder=5)
+    else:
+        pyth_sum  = res["d_td"] + res["d_os"] + res["d_eb"]
+        cross_sum = res["dot_eb_os"] + res["dot_eb_td"] + res["dot_os_td"]
+        exact_sum = pyth_sum + cross_sum
+        ax.plot(timesteps, res["total_error"], "k-",  lw=2,   label=r"$\epsilon^2$ (total)")
+        ax.plot(timesteps, exact_sum,          "k--", lw=1.5, label=r"$\Sigma d_i^2 + 2\Sigma\langle d_i,d_j\rangle$ (exact)")
+        ax.plot(timesteps, pyth_sum,           "k:",  lw=1,   label=r"$\Sigma d_i^2$ (Pythagorean)")
+        ax.plot(timesteps, res["d_td"], label=r"$d_{TD}^2$")
+        ax.plot(timesteps, res["d_os"], label=r"$d_{OS}^2$")
+        ax.plot(timesteps, res["d_eb"], label=r"$d_{EB}^2$")
+        for key, label in [
+            ("dot_eb_os", r"$|2\langle d_{EB},d_{OS}\rangle|$"),
+            ("dot_eb_td", r"$|2\langle d_{EB},d_{TD}\rangle|$"),
+            ("dot_os_td", r"$|2\langle d_{OS},d_{TD}\rangle|$"),
+        ]:
+            vals = res[key]
+            line, = ax.plot(timesteps, np.abs(vals), ls="--", alpha=0.6, label=label)
+            neg_mask = vals < 0
+            if neg_mask.any():
+                ax.scatter(timesteps[neg_mask], np.abs(vals[neg_mask]),
+                           color=line.get_color(), marker="x", s=40, zorder=5)
 
     ax.set_yscale("log")
     ax.set_xlabel("AR step t")
