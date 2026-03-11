@@ -685,4 +685,6 @@ We need more than just a trend. We need a precise characterization of each term.
 
 In order for the decomposition to be useful, we need to either show that it's exact, or at least show that it's able to rank different models in the same order as they are ranked in terms of the trajectory drift, at each timestep. If the models are not ranked similarly, then the metric isn't useful.
 
+After running experiment, it seems that there is full-agreement (the trend is good), but there is always an under-estimation of the error, especially at the beginning. We need to check whether that the specification of each term makes sense, whether there is a given term underfitting, or whether the sum of squared terms is just underestimating too much.
+
 \end{document}

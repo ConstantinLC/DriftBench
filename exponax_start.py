@@ -32,7 +32,7 @@ NET_CONFIG      = 'Dil;2;32;2;relu' #"UNet;12;2;relu"
 TRAIN_CONFIGS   = ["one", "sup;2", "sup;5"]
 OPTIM_CONFIG    = "adam;20_000;warmup_cosine;0.0;1e-3;2_000"
 NUM_SEEDS       = 1
-AR_STEPS        = 100              # Autoregressive rollout length
+AR_STEPS        = 20              # Autoregressive rollout length
 NUM_TRAJECTORIES = 20              # Number of trajectories to evaluate
 
 K               = 5               # GT steps in proxy optimization: find x_IC s.t. GT^K(x_IC) ≈ x̂_t
@@ -169,6 +169,31 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
     }
 
 # ──────────────────────────────────────────────────────────────────────
+# Ranking benchmark (§11.03.2026): does d_TD²+d_OS²+d_EB² rank models
+# the same way as ε² at each timestep?
+# ──────────────────────────────────────────────────────────────────────
+config_names = list(results.keys())
+
+# Stack arrays: shape (n_models, AR_STEPS)
+total_error_mat = np.stack([results[c]["total_error"] for c in config_names])
+pyth_sum_mat    = np.stack([results[c]["d_td"] + results[c]["d_os"] + results[c]["d_eb"]
+                            for c in config_names])
+
+# Per-timestep: do rankings match?
+rank_eps  = np.argsort(np.argsort(total_error_mat, axis=0), axis=0)  # (n_models, AR_STEPS)
+rank_pyth = np.argsort(np.argsort(pyth_sum_mat,    axis=0), axis=0)
+rank_match = (rank_eps == rank_pyth).all(axis=0)  # True if all models correctly ranked at t
+
+print("\n" + "=" * 60)
+print("Ranking benchmark (§11.03.2026): does Σd²_i rank models like ε²?")
+print(f"{'t':>4}  {'ranking matches':>16}  {'ε²':>10}  {'Σd²':>10}")
+for t in range(AR_STEPS):
+    vals_eps  = "  ".join(f"{total_error_mat[i,t]:.2e}" for i in range(len(config_names)))
+    vals_pyth = "  ".join(f"{pyth_sum_mat[i,t]:.2e}"    for i in range(len(config_names)))
+    print(f"  t={t+1:>2d}  {'YES' if rank_match[t] else 'NO':>5}  ε²=[{vals_eps}]  Σd²=[{vals_pyth}]")
+print(f"\nRanking agreement: {rank_match.mean()*100:.1f}% of timesteps ({rank_match.sum()}/{AR_STEPS})")
+
+# ──────────────────────────────────────────────────────────────────────
 # Plots: one subplot per train config
 # ──────────────────────────────────────────────────────────────────────
 timesteps = np.arange(1, AR_STEPS + 1)
@@ -198,3 +223,28 @@ plt.tight_layout()
 plt.savefig("proxy_model_evaluation.pdf", dpi=150)
 plt.savefig("proxy_model_evaluation.png", dpi=150)
 print("\nSaved proxy_model_evaluation.pdf / .png")
+
+# ── Ranking benchmark plot ──────────────────────────────────────────
+fig2, ax2 = plt.subplots(figsize=(8, 4))
+fig2.suptitle("Ranking benchmark (§11.03.2026): $\\Sigma d_i^2$ vs $\\epsilon^2$ per model", fontsize=11)
+
+colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+for i, name in enumerate(config_names):
+    ax2.plot(timesteps, total_error_mat[i], color=colors[i], lw=2,    label=f"{name}  ε²")
+    ax2.plot(timesteps, pyth_sum_mat[i],    color=colors[i], lw=1, ls="--", label=f"{name}  Σd²")
+
+# Shade timesteps where ranking disagrees
+for t in range(AR_STEPS):
+    if not rank_match[t]:
+        ax2.axvspan(t + 0.5, t + 1.5, color="red", alpha=0.15)
+
+ax2.set_yscale("log")
+ax2.set_xlabel("AR step t")
+ax2.set_ylabel("Squared L2 norm")
+ax2.legend(fontsize=7, ncol=2)
+ax2.set_title(f"Ranking agreement: {rank_match.mean()*100:.1f}% of timesteps  |  red = mismatch")
+
+plt.tight_layout()
+plt.savefig("ranking_benchmark.pdf", dpi=150)
+plt.savefig("ranking_benchmark.png", dpi=150)
+print("Saved ranking_benchmark.pdf / .png")
