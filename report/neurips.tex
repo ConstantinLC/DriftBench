@@ -677,8 +677,12 @@ An alternative is: at a given step $t$, compute the GT proxy. Then for a given $
   \label{fig:100326_proxy}
 \end{figure}
 
-\paragraph{11.03.2026 - 3}
+\paragraph{10.03.2026 - 3}
 
-We need more than just a trend. We need a precise characterization of each term. We want to know: at a given timestep, what is the contribution of each term, as in Figure \ref{fig:decomposition}. First, we need to check if the sum of the three terms actually the total error
+We need more than just a trend. We need a precise characterization of each term. We want to know: at a given timestep, what is the contribution of each term, as in Figure \ref{fig:decomposition}. First, we need to check if the sum of the three terms actually reaches the full trajectory error at a given step. This would be a first point to know if the characterization can be done.
+
+\paragraph{11.03.2026}
+
+In order for the decomposition to be useful, we need to either show that it's exact, or at least show that it's able to rank different models in the same order as they are ranked in terms of the trajectory drift, at each timestep. If the models are not ranked similarly, then the metric isn't useful.
 
 \end{document}
