@@ -260,6 +260,12 @@ We have that :
     &\leq \textcolor{blue}{\norm{X_{t+1} - {\tilde{X}_{t+1}}}} + \textcolor{green}{\norm{GT(\hat{X}_{t}) - NN\left(\hat{X}_t^{ID}\right)}} + \textcolor{red}{\norm{NN\left(\hat{X}_t^{ID}\right) - NN\left(\hat{X}_t\right)}} \\
     &= \textcolor{blue}{d_{TD}(t)} + \textcolor{green}{d_{OS}(t)} + \textcolor{red}{d_{EB}(t)}
 \end{align*}
+
+\begin{align*}
+    \norm{\hat{X}_{t+1} - X_{t+1}} = \epsilon(t+1) &\leq \norm{X_{t+1} - \tilde{X}_{t+1}} + \norm{\tilde{X}_{t+1} - \hat{X}_{t+1}} \\ 
+    &\leq \textcolor{blue}{\norm{X_{t+1} - {\tilde{X}_{t+1}}}} + \textcolor{green}{\norm{GT(\hat{X}_{t}) - NN\left(\hat{X}_t^{ID}\right)}} + \textcolor{red}{\norm{NN\left(\hat{X}_t^{ID}\right) - NN\left(\hat{X}_t\right)}} \\
+    &= \textcolor{blue}{d_{TD}(t)} + \textcolor{green}{d_{OS}(t)} + \textcolor{red}{d_{EB}(t)}
+\end{align*}
 where each term represents, respectively:
 \begin{itemize}
     \item The \textit{Trajectory-Drift} error $d_{TD}(t)$ resulting from the accumulation of errors from earlier steps, and which only depends on emulator calls up to $t-1$.
@@ -685,6 +691,6 @@ We need more than just a trend. We need a precise characterization of each term.
 
 In order for the decomposition to be useful, we need to either show that it's exact, or at least show that it's able to rank different models in the same order as they are ranked in terms of the trajectory drift, at each timestep. If the models are not ranked similarly, then the metric isn't useful.
 
-After running experiment, it seems that there is full-agreement (the trend is good), but there is always an under-estimation of the error, especially at the beginning. We need to check whether that the specification of each term makes sense, whether there is a given term underfitting, or whether the sum of squared terms is just underestimating too much.
+After running experiment, it seems that there is full-agreement (the trend is good), but there is always an under-estimation of the error, especially at the beginning. We need to check whether the specification of each term makes sense, whether there is a given term underfitting, or whether the sum of squared terms is just underestimating too much.
 
 \end{document}

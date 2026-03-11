@@ -134,6 +134,13 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
     d_td        = np.zeros(AR_STEPS)    # d_TD²(t) = ||x_{t+1} - GT(x̂_t)||²
     d_os        = np.zeros(AR_STEPS)    # d_OS²(t) = ||GT(x̂_t) - NN(x̃_t)||²
     d_eb        = np.zeros(AR_STEPS)    # d_EB²(t) = ||NN(x̃_t) - NN(x̂_t)||²
+    dot_eb_os   = np.zeros(AR_STEPS)    # 2⟨d_EB, d_OS⟩
+    dot_eb_td   = np.zeros(AR_STEPS)    # 2⟨d_EB, d_TD⟩
+    dot_os_td   = np.zeros(AR_STEPS)    # 2⟨d_OS, d_TD⟩
+
+    def dot(a, b):
+        """Mean over batch of spatial dot products: E[⟨a_i, b_i⟩]."""
+        return jnp.mean(jnp.sum(a * b, axis=(-2, -1)))
 
     for t in range(AR_STEPS):
         nn_states_t = nn_trajectories[:, t]      # x̂_t     (N, C, X)
@@ -149,23 +156,39 @@ for train_config, weight_path in zip(TRAIN_CONFIGS, weight_paths):
         # NN applied to proxy: NN(x̃_t)
         nn_on_proxy_t = jax.vmap(neural_stepper)(proxy_t)
 
-        # Three-term decomposition
-        total_error[t] = float(jnp.mean(jnp.mean((nn_next_t - gt_next_t) ** 2, axis=(-2, -1))))
-        d_td[t]        = float(jnp.mean(jnp.mean((gt_next_t - gt_on_nn_t) ** 2, axis=(-2, -1))))
-        d_os[t]        = float(jnp.mean(jnp.mean((gt_on_nn_t - nn_on_proxy_t) ** 2, axis=(-2, -1))))
-        d_eb[t]        = float(jnp.mean(jnp.mean((nn_on_proxy_t - nn_next_t) ** 2, axis=(-2, -1))))
+        # Error vectors (N, C, X)
+        vec_td = gt_next_t    - gt_on_nn_t      # GT(x̂_t) → x_{t+1}
+        vec_os = gt_on_nn_t   - nn_on_proxy_t   # NN(x̃_t) → GT(x̂_t)
+        vec_eb = nn_on_proxy_t - nn_next_t       # NN(x̂_t) → NN(x̃_t)
+        # Note: vec_td + vec_os + vec_eb = gt_next_t - nn_next_t = -ε  (telescoping)
 
-        if t % 10 == 0:
+        # Squared norms
+        total_error[t] = float(jnp.mean(jnp.sum((nn_next_t - gt_next_t) ** 2, axis=(-2, -1))))
+        d_td[t]        = float(jnp.mean(jnp.sum(vec_td ** 2, axis=(-2, -1))))
+        d_os[t]        = float(jnp.mean(jnp.sum(vec_os ** 2, axis=(-2, -1))))
+        d_eb[t]        = float(jnp.mean(jnp.sum(vec_eb ** 2, axis=(-2, -1))))
+
+        # Cross dot-products (×2 for the exact expansion)
+        dot_eb_os[t] = float(2 * dot(vec_eb, vec_os))
+        dot_eb_td[t] = float(2 * dot(vec_eb, vec_td))
+        dot_os_td[t] = float(2 * dot(vec_os, vec_td))
+
+        if t % 5 == 0:
             pyth_sum = d_td[t] + d_os[t] + d_eb[t]
-            print(f"  t={t:>3d}  ε²={total_error[t]:.3e}  "
-                  f"d_TD²={d_td[t]:.3e}  d_OS²={d_os[t]:.3e}  d_EB²={d_eb[t]:.3e}  "
-                  f"sum={pyth_sum:.3e}  gap={pyth_sum - total_error[t]:.3e}")
+            exact_sum = pyth_sum + dot_eb_os[t] + dot_eb_td[t] + dot_os_td[t]
+            cross_frac = (dot_eb_os[t] + dot_eb_td[t] + dot_os_td[t]) / (total_error[t] + 1e-30)
+            print(f"  t={t+1:>3d}  ε²={total_error[t]:.3e}  "
+                  f"Σd²={pyth_sum:.3e}  exact={exact_sum:.3e}  "
+                  f"cross/ε²={cross_frac:+.3f}")
 
     results[train_config] = {
         "total_error": total_error,
         "d_td": d_td,
         "d_os": d_os,
         "d_eb": d_eb,
+        "dot_eb_os": dot_eb_os,
+        "dot_eb_td": dot_eb_td,
+        "dot_os_td": dot_os_td,
     }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -178,20 +201,24 @@ config_names = list(results.keys())
 total_error_mat = np.stack([results[c]["total_error"] for c in config_names])
 pyth_sum_mat    = np.stack([results[c]["d_td"] + results[c]["d_os"] + results[c]["d_eb"]
                             for c in config_names])
+exact_sum_mat   = np.stack([results[c]["d_td"] + results[c]["d_os"] + results[c]["d_eb"]
+                            + results[c]["dot_eb_os"] + results[c]["dot_eb_td"] + results[c]["dot_os_td"]
+                            for c in config_names])
 
 # Per-timestep: do rankings match?
-rank_eps  = np.argsort(np.argsort(total_error_mat, axis=0), axis=0)  # (n_models, AR_STEPS)
-rank_pyth = np.argsort(np.argsort(pyth_sum_mat,    axis=0), axis=0)
-rank_match = (rank_eps == rank_pyth).all(axis=0)  # True if all models correctly ranked at t
+rank_eps   = np.argsort(np.argsort(total_error_mat, axis=0), axis=0)  # (n_models, AR_STEPS)
+rank_pyth  = np.argsort(np.argsort(pyth_sum_mat,    axis=0), axis=0)
+rank_exact = np.argsort(np.argsort(exact_sum_mat,   axis=0), axis=0)
+rank_match_pyth  = (rank_eps == rank_pyth).all(axis=0)
+rank_match_exact = (rank_eps == rank_exact).all(axis=0)
 
 print("\n" + "=" * 60)
-print("Ranking benchmark (§11.03.2026): does Σd²_i rank models like ε²?")
-print(f"{'t':>4}  {'ranking matches':>16}  {'ε²':>10}  {'Σd²':>10}")
+print("Ranking benchmark (§11.03.2026)")
+print(f"{'t':>4}  {'Σd² matches':>12}  {'Σd²+cross matches':>18}")
 for t in range(AR_STEPS):
-    vals_eps  = "  ".join(f"{total_error_mat[i,t]:.2e}" for i in range(len(config_names)))
-    vals_pyth = "  ".join(f"{pyth_sum_mat[i,t]:.2e}"    for i in range(len(config_names)))
-    print(f"  t={t+1:>2d}  {'YES' if rank_match[t] else 'NO':>5}  ε²=[{vals_eps}]  Σd²=[{vals_pyth}]")
-print(f"\nRanking agreement: {rank_match.mean()*100:.1f}% of timesteps ({rank_match.sum()}/{AR_STEPS})")
+    print(f"  t={t+1:>2d}  {'YES' if rank_match_pyth[t] else 'NO':>11}  {'YES' if rank_match_exact[t] else 'NO':>17}")
+print(f"\nΣd²       agreement: {rank_match_pyth.mean()*100:.1f}% ({rank_match_pyth.sum()}/{AR_STEPS})")
+print(f"Σd²+cross agreement: {rank_match_exact.mean()*100:.1f}% ({rank_match_exact.sum()}/{AR_STEPS})")
 
 # ──────────────────────────────────────────────────────────────────────
 # Plots: one subplot per train config
@@ -205,13 +232,28 @@ if n_configs == 1:
 fig.suptitle(f"Three-term decomposition (squared norms)  |  K={K}  |  {NET_CONFIG}  |  {SCENARIO_NAME}", fontsize=12)
 
 for ax, (train_config, res) in zip(axes, results.items()):
-    pyth_sum = res["d_td"] + res["d_os"] + res["d_eb"]
+    pyth_sum  = res["d_td"] + res["d_os"] + res["d_eb"]
+    cross_sum = res["dot_eb_os"] + res["dot_eb_td"] + res["dot_os_td"]
+    exact_sum = pyth_sum + cross_sum
 
-    ax.plot(timesteps, res["total_error"], "k-",  lw=2, label=r"$\epsilon^2(t{+}1)$ (total)")
-    ax.plot(timesteps, pyth_sum,            "k--", lw=1, label=r"$d_{TD}^2+d_{OS}^2+d_{EB}^2$")
-    ax.plot(timesteps, res["d_td"], label=r"$d_{TD}^2$ (traj. drift)")
-    ax.plot(timesteps, res["d_os"], label=r"$d_{OS}^2$ (one-step)")
-    ax.plot(timesteps, res["d_eb"], label=r"$d_{EB}^2$ (exposure bias)")
+    ax.plot(timesteps, res["total_error"], "k-",  lw=2,   label=r"$\epsilon^2$ (total)")
+    ax.plot(timesteps, exact_sum,          "k--", lw=1.5, label=r"$\Sigma d_i^2 + 2\Sigma\langle d_i,d_j\rangle$ (exact)")
+    ax.plot(timesteps, pyth_sum,           "k:",  lw=1,   label=r"$\Sigma d_i^2$ (Pythagorean)")
+    ax.plot(timesteps, res["d_td"], label=r"$d_{TD}^2$")
+    ax.plot(timesteps, res["d_os"], label=r"$d_{OS}^2$")
+    ax.plot(timesteps, res["d_eb"], label=r"$d_{EB}^2$")
+    for key, label in [
+        ("dot_eb_os", r"$|2\langle d_{EB},d_{OS}\rangle|$"),
+        ("dot_eb_td", r"$|2\langle d_{EB},d_{TD}\rangle|$"),
+        ("dot_os_td", r"$|2\langle d_{OS},d_{TD}\rangle|$"),
+    ]:
+        vals = res[key]
+        line, = ax.plot(timesteps, np.abs(vals), ls="--", alpha=0.6, label=label)
+        # Mark negative regions with filled circles
+        neg_mask = vals < 0
+        if neg_mask.any():
+            ax.scatter(timesteps[neg_mask], np.abs(vals[neg_mask]),
+                       color=line.get_color(), marker="x", s=40, zorder=5)
 
     ax.set_yscale("log")
     ax.set_xlabel("AR step t")
@@ -230,19 +272,24 @@ fig2.suptitle("Ranking benchmark (§11.03.2026): $\\Sigma d_i^2$ vs $\\epsilon^2
 
 colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 for i, name in enumerate(config_names):
-    ax2.plot(timesteps, total_error_mat[i], color=colors[i], lw=2,    label=f"{name}  ε²")
-    ax2.plot(timesteps, pyth_sum_mat[i],    color=colors[i], lw=1, ls="--", label=f"{name}  Σd²")
+    markers = ["o", "s", "^", "D", "v"]
+    mk = markers[i % len(markers)]
+    ax2.plot(timesteps, total_error_mat[i], color=colors[i],    lw=2,                            label=f"{name}  ε²")
+    ax2.plot(timesteps, pyth_sum_mat[i],    color="tab:orange", lw=1, ls="--", marker=mk, ms=4,  label=f"{name}  Σd²")
+    ax2.plot(timesteps, exact_sum_mat[i],   color="tab:green",  lw=1, ls=":",  marker=mk, ms=4,  label=f"{name}  Σd²+cross")
 
-# Shade timesteps where ranking disagrees
+# Shade timesteps where Σd² ranking disagrees (red) or exact disagrees (orange)
 for t in range(AR_STEPS):
-    if not rank_match[t]:
+    if not rank_match_pyth[t]:
         ax2.axvspan(t + 0.5, t + 1.5, color="red", alpha=0.15)
+    elif not rank_match_exact[t]:
+        ax2.axvspan(t + 0.5, t + 1.5, color="orange", alpha=0.15)
 
 ax2.set_yscale("log")
 ax2.set_xlabel("AR step t")
 ax2.set_ylabel("Squared L2 norm")
 ax2.legend(fontsize=7, ncol=2)
-ax2.set_title(f"Ranking agreement: {rank_match.mean()*100:.1f}% of timesteps  |  red = mismatch")
+ax2.set_title(f"Ranking agreement: Σd²={rank_match_pyth.mean()*100:.1f}%  exact={rank_match_exact.mean()*100:.1f}%  |  red=Σd² mismatch  orange=exact mismatch")
 
 plt.tight_layout()
 plt.savefig("ranking_benchmark.pdf", dpi=150)
