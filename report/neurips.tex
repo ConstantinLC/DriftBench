@@ -267,11 +267,11 @@ Another possibility (11/03/2026):
     &= \textcolor{blue}{d_{TD}(t)} + \textcolor{green}{d_{OS}(t)} + \textcolor{red}{d_{EB}(t)}
 \end{align*}
 
-Another possibility - Without looking for in-distribution equivalent (11/03/2026): 
+Another possibility - Without looking for in-distribution proxy (11/03/2026): 
 \begin{align*}
     \norm{\hat{X}_{t+1} - X_{t+1}} = \epsilon(t+1)
-    &\leq \textcolor{blue}{\norm{X_{t+1} - GT(\hat{X}_{t}^{ID})}} + \textcolor{green}{\norm{GT(\hat{X}_{t}^{ID}) - NN\left(\hat{X}_t^{ID}\right)}} + \textcolor{red}{\norm{NN\left(\hat{X}_t^{ID}\right) - NN\left(\hat{X}_t\right)}} \\
-    &= \textcolor{blue}{d_{TD}(t)} + \textcolor{green}{d_{OS}(t)} + \textcolor{red}{d_{EB}(t)}
+    &\leq \textcolor{blue}{\norm{X_{t+1} - GT(\hat{X}_t)}} + \textcolor{red}{\norm{GT\left(\hat{X}_t\right) - NN\left(\hat{X}_t\right)}} \\
+    &= \textcolor{blue}{d_{TD}(t)} + \textcolor{red}{d_{OS+EB}(t)}
 \end{align*}
 where each term represents, respectively:
 \begin{itemize}
@@ -699,5 +699,39 @@ We need more than just a trend. We need a precise characterization of each term.
 In order for the decomposition to be useful, we need to either show that it's exact, or at least show that it's able to rank different models in the same order as they are ranked in terms of the trajectory drift, at each timestep. If the models are not ranked similarly, then the metric isn't useful.
 
 After running experiment, it seems that there is full-agreement (the trend is good), but there is always an under-estimation of the error, especially at the beginning. We need to check whether the specification of each term makes sense, whether there is a given term underfitting, or whether the sum of squared terms is just underestimating too much.
+
+\paragraph{15.03.2026}
+
+\begin{figure}
+   \centering
+  \includegraphics[width=0.95\textwidth]{/mnt/SSD2/constantin/drift-bench/outputs/2026-03-15/component_ratios.pdf}
+  \label{fig:150326_component_ratios}
+  \caption{15/03/2026 : Component ratios}
+\end{figure}
+
+
+
+Main observation : As we unroll the training for more timesteps, the absolute-value of the dot-product $<d_{0SEB}, d_{TD}>$ gets reduced. This seems to be a main effect of the unrolling.
+
+Intuitively, it makes sense: Assuming that $d_{TD}$ is a field whose magnitude increases in the direction of the field, then one should try to position the error as perpendicular to it, so that it doesn't increase more. This is a case of predictive-placement, not of exposure-bias (interesting!)
+
+The question is : can we reproduce this effect without unrolling for as many as 8 steps ?
+
+At timestep $t$, to minimize the dot-product, one can minimize:
+\begin{align}
+  min_\theta \mid<d_{OSEB}, d_{TD}> \mid &= min_\theta \mid<u_\theta(\hat{x}_{t+1}) - GT(\hat{x}_{t}), x_{t+1} - GT(\hat{x}_t)> \mid \\
+\end{align}
+
+And so the loss becomes :
+\begin{align}
+  L_\theta(t) = \alpha A_\theta(t) + \beta B_\theta(t)
+\end{align}
+where $A_\theta(t) = \norm{u_\theta(\hat{x}_{t-1}) - GT(x_{t-1})}^2$
+
+The total loss to train on is then :
+\begin{align}
+  L_\theta^{UT} = \sum_{t=1}^K L_\theta(t)
+\end{align}
+For now, let's evaluate it for K=2 and see how it behaves.
 
 \end{document}
