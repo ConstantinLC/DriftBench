@@ -1,0 +1,26 @@
+# Byte-compiled / cache
+__pycache__/
+*.pyc
+
+# Large generated/output directories
+outputs/
+results/
+checkpoints/
+opt_curves/
+
+# Logs
+nohup.out
+*.log
+texput.log
+
+# LaTeX / report sources and build artifacts
+*.tex
+*.pdf
+*.aux
+*.fdb_latexmk
+*.fls
+*.out
+*.synctex.gz
+*.nav
+*.snm
+*.toc
