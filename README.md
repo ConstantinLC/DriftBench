@@ -1,41 +1,103 @@
-## INVERSE PROBLEM: ML Model Trajectory Matching with HR Simulation
+## Error Decomposition for Autoregressive Neural PDE Emulators
 
-### **Given :**
-  1. An ML model trained to predict coarse-resolution turbulence dynamics
-  2. A high-resolution differentiable (HR) physics simulator
-  
-### **Goal:**
-  For each autoregressive step, find an HR initial condition that, when evolved through K steps of HR physics simulator, matches the hypothetical HR equivalent of the LR model prediction at that autoregressive step.
-  
-### **Methodology:**
-1. Generate a coarse trajectory using the ML model (forward pass)
-2. Optimize the HR initial condition using gradient descent:
-   - Simulate the HR state forward
-   - Coarsen the result
-   - Compare to ML model's prediction
-   - Backpropagate through the entire simulation to update the initial condition
+`exponax_start.py` is the main entry point. It trains one or more neural
+emulators on a PDE scenario (via [`exponax`](https://github.com/Ceyron/exponax)
+/ [`apebench`](https://github.com/tum-pbs/apebench)), rolls them out
+autoregressively, and decomposes their trajectory error against a ground-truth
+(GT) rollout of the reference simulator.
 
-### **Hyperparameters:**
-1. The number K of HR simulator steps to match the ML emulator state can be set to 2 for Kolmogorov Flow. It may be relevant to look at the effect of the number of simulation steps on the [Validation](#validation) metrics.
-2. The number of training iterations was set to 1000. It would be relevant to explore how much increasing or reducing it decreases the accuracy of the HR equivalent. In particular, later steps 
-3. Suppose we want to estimate the HR equivalent of the ML prediction $\hat{x}_t$ at timestep $t$. The initialization for the optimization of the initial condition is set to the true HR state $x_t$.
+### **Core decomposition (default, `NO_PROXY = True`):**
 
-### **Validation:**
-1. The pure accuracy between the coarsened proxy HR and the model's prediction is a good metric for training, but not so much for evaluation. Indeed, we are more interested to check if the obtained proxy state matches the "true" hypothetical high-resolution equivalent of the LR model prediction. 
-2. As the time $t$ increases, it may become harder and harder to match the model's prediction $\hat{x}_t$ since there may not be an HR equivalent of the model's prediction if it drifts outside of physical distribution. Since the usage of the proxy emulator (see ) depends on how well it matches the true state, this may be of concern.
+At each autoregressive step $t$, given the model's own state $\hat{x}_t$ and
+its next prediction $\hat{x}_{t+1} = NN(\hat{x}_t)$:
 
-### **Usage of the proxy emulator:**
-1. Given the model prediction $\hat{x}_t$, the HR proxy is written as $\tilde{x}_t$. We wish to look at the evolution of $ \lVert \mathcal{M}(\hat{x}_t) - GT(\tilde{x}_t) \rVert $. An increase in this distance indicates the presence of exposure-bias.
-2. Look at the evolution of $\lVert \mathcal{M}(\hat{x}_t) - x_{t+1} \rVert - \lVert \mathcal{M}(\hat{x}_t) - GT(\tilde{x}_t) \rVert $. This quantity is the trajectory drift, which is the error that has accumulated until step $t$ and which cannot be reduced even when using the true simulator.
-3. One could also think about "divergence spectrum" (or some sort of bifurcation map), where we call the ground-truth simulation multiple times on a given HR proxy, and look at divergence we get from the true trajectory (at a given point). This could tell us about the "irreducible error" behaviour. 
-4. For different models (with let's say fixed one-step error), can we obtain a response of the trajectory drift w.r.t the shape of the error (for instance, the frequencies)
+```
+GT_on_NN(t) = GT(x̂_t)                       # one reference-simulator step from the model's own state
+TD(t)   = x_{t+1} - GT(x̂_t)                  # Trajectory Drift
+OSEB(t) = GT(x̂_t) - x̂_{t+1}                  # One-Step error + Exposure Bias (combined)
+ε(t+1)  = x̂_{t+1} - x_{t+1} = -(TD(t) + OSEB(t))
+```
 
-### **Resolutions:** 
-1. HR Simulation (256x256)
-    ↓ (coarsen by 4x)
-2. Coarse Resolution (64x64) ← ML Model operates here
-    ↑ (what we optimize to match)
-3. Proxy HR Simulation (256x256) 
+- **Trajectory Drift (TD):** how far the *true* trajectory has already
+  diverged from the model's current state, measured by applying one step of
+  the real simulator from $\hat{x}_t$. This is error already "baked in" from
+  earlier steps — physics can't fix it.
+- **One-Step + Exposure Bias (OSEB):** the model's own one-step error, but
+  evaluated at its own (possibly out-of-distribution) state $\hat{x}_t$
+  rather than at a true state. Without an explicit HR/proxy correction this
+  conflates ordinary one-step error and exposure bias into a single term
+  (`oseb_gt` is also logged: the same one-step error evaluated at the *true*
+  state $x_t$, used to normalize/compare against).
+- **Exact Pythagorean check:** since $\varepsilon = TD + OSEB$ (vector
+  identity, not an approximation), the script also logs the cross term
+  $2\langle TD, OSEB\rangle$ and $\cos(TD, OSEB)$ so you can see how close the
+  decomposition is to a true orthogonal (Pythagorean) split at each step.
 
-### **Potential related litterature:**
-1. Dynamical systems
+A legacy three/two-term variant (`NO_PROXY = False`) is still implemented: it
+optimizes an initial condition so that $K$ simulator steps reproduce the
+model's prediction (the original HR-proxy idea from this repo's earlier
+Kolmogorov-flow-specific setup), then splits error into Trajectory Drift +
+One-Step-error + Exposure-Bias as three separate terms. This path is off by
+default and much more expensive (an `N_OPT_STEPS`-iteration optimization per
+timestep, per sample).
+
+### **What the script actually does, end to end:**
+
+1. **Configure a scenario.** Any `apebench` scenario, selected by
+   `--scenario_name` (e.g. `phy_kolm_flow`, `norm_ks`, `norm_kdv`,
+   `phy_burgers`, ...). `--predict_steps` can wrap the reference stepper so
+   the model is trained/evaluated to jump several simulator steps ahead in a
+   single forward call.
+2. **Train (or load cached) emulators** for every combination of
+   `--net_configs` (e.g. `UNet;12;2;relu`, `FNO;12;18;4;gelu`) ×
+   `--train_configs` × learning rate in `--lrs`, over `--num_seeds` seeds.
+   - Plain configs (`one`, `sup;N`, ...) go through `apebench.run_study_convenience`.
+   - Chained configs (`cfg1@epochs1->cfg2@epochs2->...`) and the custom
+     unrolling losses defined in `mix_chain_training.py` (`mix;M;K`, `fg;N`,
+     `tdcross;N;...`, `tdcrossos;N;...`) are trained stage-by-stage via
+     `mix_chain_training.train_chain`.
+   - Trained weights are cached under `outputs/<scenario>/weights/`, keyed by
+     their own net/train/optim identity, so unrelated config changes (e.g.
+     `--ar_steps`) don't force retraining.
+3. **Roll out** each trained model for `--ar_steps` steps from a shared,
+   warmed-up set of initial conditions, alongside the GT reference rollout.
+4. **Compute the decomposition** above at every AR step, averaged (and
+   std/SEM'd) over seeds.
+5. **Save figures and raw arrays** to `outputs/<scenario>/<config-hash>/`
+   (the hash covers every run parameter, so different configs never
+   overwrite each other's outputs; the resolved config is dumped to
+   `config.json` in the same folder):
+   - `total_error_per_model.png` — $\varepsilon^2(t)$ per model/config.
+   - `component_ratios.png` / `component_ratios_abs.png` — stacked bar of
+     TD / cross-term / OSEB as a % (and absolute value) of total error, per
+     AR step and per training config.
+   - `term_<td|cross_td_os|os>.png` — each term's evolution over AR steps
+     (with an extra normalized OSEB/GT-OSEB panel).
+   - `cosine_similarity.png` — $\cos(TD, OSEB)$ over AR steps.
+   - `scatter_error_vs_td_next.png` — $\varepsilon^2(t)$ vs. $TD^2(t+1)$.
+   - `training_loss_curves.png` / `training_loss.csv` — convergence check
+     per training method/LR.
+   - `raw_arrays.npz` — every per-seed array, for downstream refitting
+     (e.g. `fit_error_recurrence.py`) without rerunning inference.
+
+### **Usage:**
+
+```bash
+python exponax_start.py \
+  --scenario_name phy_kolm_flow \
+  --net_configs "UNet;12;2;relu" \
+  --train_configs one "sup;2" "sup;4" "sup;8" \
+  --lrs 1e-3 \
+  --num_seeds 3 \
+  --ar_steps 10
+```
+
+Run `python exponax_start.py --help` for the full argument list
+(`--gpu_id`, `--n_epochs`, `--predict_steps`, etc.).
+
+### **Resolutions / scenarios:**
+
+Scenario resolution and dynamics are whatever the chosen `apebench` scenario
+defines (e.g. `phy_kolm_flow` is 2D Kolmogorov Flow) — there is no longer a
+fixed HR(256)/coarse(64) split baked into the main pipeline; that setup only
+still applies inside the legacy `NO_PROXY = False` proxy path.
